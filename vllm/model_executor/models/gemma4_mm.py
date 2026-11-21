@@ -35,16 +35,17 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4TextConfig,
 )
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -53,6 +54,7 @@ from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -75,6 +77,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -87,6 +90,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    SupportsTranscription,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -1031,7 +1035,9 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsTranscription,
 ):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
     supports_encoder_tp_data = True
     is_3d_moe_weight: ClassVar[bool] = True
@@ -2542,3 +2548,60 @@ class Gemma4ForConditionalGeneration(
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")
+
+    @classmethod
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        """Render the model card ASR prompt, or a translation prompt in the same
+        style, through the chat template.
+        """
+        src = cls.supported_languages.get(stt_params.language or "")
+
+        if stt_params.task_type == "translate":
+            # With a prompt that asks for the translation only, the model
+            # answers in the source language unless the target is English.
+            if stt_params.to_language not in (None, "en"):
+                raise ValueError(
+                    "Gemma 4 translates speech into English only; got "
+                    f"`to_language`={stt_params.to_language!r}."
+                )
+            src_part = f" in {src}" if src else ""
+            text = (
+                f"Translate the following speech segment{src_part} into English."
+                "\n\nFollow these specific instructions for formatting the answer:"
+                "\n* Only output the translation in English, with no newlines."
+            )
+        else:
+            source = f"{src} into {src} text" if src else "its original language"
+            text = (
+                f"Transcribe the following speech segment in {source}."
+                "\n\nFollow these specific instructions for formatting the answer:"
+                "\n* Only output the transcription, with no newlines."
+                "\n* When transcribing numbers, write the digits, i.e. write 1.7"
+                " and not one point seven, and write 3 instead of three."
+            )
+
+        tokenizer = cached_tokenizer_from_config(stt_params.model_config)
+        prompt = tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}, {"type": "audio"}],
+                }
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        return TokensPrompt(
+            prompt_token_ids=tokenizer.encode(prompt, add_special_tokens=False),
+            multi_modal_data={
+                "audio": (stt_params.audio, stt_params.stt_config.sample_rate)
+            },
+        )
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        # Gemma 4 accepts at most 30 s of audio per clip; longer audio is chunked.
+        return SpeechToTextConfig(max_audio_clip_s=30, sample_rate=16000)

@@ -794,6 +794,8 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
+| `Gemma4ForConditionalGeneration` | Gemma 4 | `google/gemma-4-E2B-it`, `google/gemma-4-E4B-it` | ✅︎ | ✅︎ |
+| `Gemma4UnifiedForConditionalGeneration` | Gemma 4 Unified | `google/gemma-4-12B-it` | | ✅︎ |
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
@@ -823,6 +825,10 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     backend (FlashAttention on CUDA GPUs that support it; `--mm-encoder-attn-backend` selects another). In
     bfloat16, its output can depend on that backend and on the other clips in the batch: small rounding
     differences can flip the thresholded speaker features on some frames.
+
+!!! note
+    Gemma 4 checkpoints without audio support (e.g. `google/gemma-4-31B-it`) reject audio requests.
+    Gemma 4 translates speech into English only.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.

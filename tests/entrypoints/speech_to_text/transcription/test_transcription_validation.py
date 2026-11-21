@@ -365,9 +365,21 @@ async def test_basic_audio_with_lora(mary_had_lamb):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["google/gemma-3n-E2B-it", "Qwen/Qwen3-ASR-0.6B"]
+    ("model_name", "expected_text"),
+    [
+        pytest.param(
+            "google/gemma-3n-E2B-it", "ove il mio corpo fanciulletto", id="gemma-3n"
+        ),
+        # Gemma 4 E2B hears "fanciolletto".
+        pytest.param(
+            "google/gemma-4-E2B-it", "le sacre sponde, ove il mio corpo", id="gemma-4"
+        ),
+        pytest.param(
+            "Qwen/Qwen3-ASR-0.6B", "ove il mio corpo fanciulletto", id="qwen3-asr"
+        ),
+    ],
 )
-async def test_basic_audio_foscolo(foscolo, model_name):
+async def test_basic_audio_foscolo(foscolo, model_name, expected_text):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.
     server_args = ["--enforce-eager", *ROCM_EXTRA_ARGS]
@@ -383,7 +395,7 @@ async def test_basic_audio_foscolo(foscolo, model_name):
             model_name,
             foscolo,
             language="it",
-            expected_text="ove il mio corpo fanciulletto",
+            expected_text=expected_text,
         )
 
 

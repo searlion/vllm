@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -10,7 +11,9 @@ import torch
 from PIL import Image as PILImage
 from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TokensPrompt
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     build_mm_input_norm,
@@ -25,11 +28,15 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ImagePixelInputs,
     Gemma4ProcessingInfo,
 )
-from vllm.model_executor.models.interfaces import supports_multimodal
+from vllm.model_executor.models.interfaces import (
+    supports_multimodal,
+    supports_transcription,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.platforms import current_platform
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
@@ -38,6 +45,7 @@ from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+GEMMA4_UNIFIED_MODEL_ID = "google/gemma-4-12B-it"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
 
 
@@ -455,6 +463,116 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+_ASR_FORMAT = (
+    "\n\nFollow these specific instructions for formatting the answer:"
+    "\n* Only output the transcription, with no newlines."
+    "\n* When transcribing numbers, write the digits, i.e. write 1.7"
+    " and not one point seven, and write 3 instead of three."
+)
+_AST_FORMAT = (
+    "\n\nFollow these specific instructions for formatting the answer:"
+    "\n* Only output the translation in English, with no newlines."
+)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "generation_prompt"),
+    [
+        (GEMMA4_MODEL_ID, "<|turn>model\n"),
+        (GEMMA4_UNIFIED_MODEL_ID, "<|turn>model\n<|channel>thought\n<channel|>"),
+    ],
+    ids=["e2b", "unified"],
+)
+@pytest.mark.parametrize(
+    ("task_type", "language", "to_language", "instruction"),
+    [
+        (
+            "transcribe",
+            "it",
+            None,
+            "Transcribe the following speech segment in Italian into Italian text."
+            + _ASR_FORMAT,
+        ),
+        (
+            "transcribe",
+            None,
+            None,
+            "Transcribe the following speech segment in its original language."
+            + _ASR_FORMAT,
+        ),
+        (
+            "translate",
+            "it",
+            "en",
+            "Translate the following speech segment in Italian into English."
+            + _AST_FORMAT,
+        ),
+        (
+            "translate",
+            None,
+            None,
+            "Translate the following speech segment into English." + _AST_FORMAT,
+        ),
+    ],
+    ids=["transcribe-it", "transcribe", "translate-it-en", "translate"],
+)
+def test_speech_to_text_prompt(
+    model_id: str,
+    generation_prompt: str,
+    task_type: str,
+    language: str | None,
+    to_language: str | None,
+    instruction: str,
+):
+    """Speech-to-text requests use the model card prompt followed by the audio,
+    rendered through each model's own chat template.
+    """
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": 1})
+    model_cls = get_model_cls(ctx.model_config)
+    assert supports_transcription(model_cls)
+    stt_config = model_cls.get_speech_to_text_config(ctx.model_config, task_type)
+    audio = np.zeros(16000, dtype=np.float32)
+
+    prompt = model_cls.get_generation_prompt(
+        SpeechToTextParams(
+            audio=audio,
+            stt_config=stt_config,
+            model_config=ctx.model_config,
+            language=language,
+            task_type=task_type,
+            to_language=to_language,
+        )
+    )
+
+    prompt = cast(TokensPrompt, prompt)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
+    token_ids = prompt["prompt_token_ids"]
+    assert tokenizer.decode(token_ids) == (
+        f"<bos><|turn>user\n{instruction}<|audio|><turn|>\n{generation_prompt}"
+    )
+    assert token_ids.count(tokenizer.convert_tokens_to_ids("<|audio|>")) == 1
+    assert prompt["multi_modal_data"] == {"audio": (audio, 16000)}
+
+
+def test_speech_to_text_rejects_non_english_translation():
+    """Gemma 4 answers in the source language when asked for a translation
+    into anything but English, so such requests must fail.
+    """
+    ctx = build_model_context(GEMMA4_MODEL_ID, limit_mm_per_prompt={"audio": 1})
+    model_cls = Gemma4ForConditionalGeneration
+    stt_params = SpeechToTextParams(
+        audio=np.zeros(16000, dtype=np.float32),
+        stt_config=model_cls.get_speech_to_text_config(ctx.model_config, "translate"),
+        model_config=ctx.model_config,
+        language="it",
+        task_type="translate",
+        to_language="es",
+    )
+
+    with pytest.raises(ValueError, match="into English only"):
+        model_cls.get_generation_prompt(stt_params)
 
 
 # Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder

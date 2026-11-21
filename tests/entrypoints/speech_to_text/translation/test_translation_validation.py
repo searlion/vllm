@@ -53,7 +53,8 @@ def _get_rocm_attention_config(model_name):
             return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
         return {"backend": "TRITON_ATTN"}
 
-    if cdna_version > 2:
+    # ROCM_AITER_FA does not support Gemma 4's 512 global head size.
+    if cdna_version > 2 and "gemma-4" not in model_name:
         return {"backend": "ROCM_AITER_FA"}
     return None
 
@@ -66,7 +67,8 @@ def _get_server_args(attention_config):
 
 
 @pytest.fixture(
-    scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
+    scope="module",
+    params=["openai/whisper-small", "google/gemma-3n-E2B-it", "google/gemma-4-E2B-it"],
 )
 def server(request):
     # Parametrize over model name
